@@ -37,8 +37,7 @@ class slider():
         self.frame = 0
         self.l = plt.imshow(self.data[:,:,self.frame], vmin = 0, vmax = 1) 
         axframe = plt.axes([0.25, 0.1, 0.65, 0.03])
-        self.sframe = wdg.Slider(axframe, 'Frame', 0, self.data.shape[2]-1,
-                                 valfmt='%0.0f')
+        self.sframe = wdg.Slider(axframe, 'Frame', 0, self.data.shape[2]-1, valfmt='%0.0f')
         self.sframe.on_changed(self.update)
 
     def update(self, val):
@@ -52,12 +51,12 @@ def interface_mask(im):
     
     for i in range(im.shape[1]):
         skymask[0:np.argmin(im[:,i]), i] = 1      
+    
     skymask = skymask.astype(bool)
     return  skymask
 
 def delta_stack(ims,im):
-    delta_ims = ims / (np.repeat(im.reshape((ims.shape[0], ims.shape[1], 1)),
-                                 ims.shape[2], axis = 2))
+    delta_ims = ims / (np.repeat(im.reshape((ims.shape[0], ims.shape[1], 1)), ims.shape[2], axis = 2))
     noise = np.std(delta_ims) 
     return delta_ims, noise
 
@@ -147,11 +146,11 @@ def scale_stack(ims):
     ims[ims < 0] = 0
     return ims
 
-def denoise_segmentation(segmentation):
+def denoise_segmentation(segmentation, filter_size):
     additive = (segmentation == 0)
     subtractive = (segmentation == 2)
-    additive = ndi.median_filter(additive, size = (6, 6, 1))
-    subtractive = ndi.median_filter(subtractive, size = (6, 6, 1))
+    additive = ndi.median_filter(additive, size = filter_size)
+    subtractive = ndi.median_filter(subtractive, size = filter_size)
     segmentation = np.ones_like(segmentation)
     segmentation[additive] = 0
     segmentation[subtractive] = 2
@@ -159,17 +158,12 @@ def denoise_segmentation(segmentation):
 
 def interpret_segmentation(segmentation, skymask, keyhole_threshold):
 
-    # Segmentation cleanup - remove segemnted negative build above initial 
-    # level as this is impossible
-    segmentation[((segmentation == 2) & np.repeat(skymask.reshape((
-        segmentation.shape[0],segmentation.shape[1], 1)),segmentation.shape[2],
-        axis = 2))] = 1
-    # Segmentation cleanup - remove segemnted positive build below initial 
-    # level as this would be unexpexted - review if using dissimilar powder
-    # and substrate
-    segmentation[((segmentation == 0) & ~np.repeat(skymask.reshape((
-        segmentation.shape[0],segmentation.shape[1], 1)),segmentation.shape[2],
-        axis = 2))] = 1
+    skymask = np.repeat(skymask.reshape((segmentation.shape[0],segmentation.shape[1], 1)), segmentation.shape[2], axis = 2)
+
+    # Segmentation cleanup - remove segemnted negative build above initial level as this is impossible
+    segmentation[((segmentation == 2) & skymask)] = 1
+    # Segmentation cleanup - remove segemnted positive build below initial level as this would be unexpexted - review if using dissimilar powder and substrate
+    segmentation[((segmentation == 0) & ~skymask)] = 1
     
     # isolate and extract the keyhole location and label the keyhole as 3     
     n = 0
@@ -179,18 +173,14 @@ def interpret_segmentation(segmentation, skymask, keyhole_threshold):
         clean = skim.remove_small_objects(clean, min_size = keyhole_threshold)
         if (np.sum(clean) > 0):
             clean = skime.label(clean)
-            clean = (clean==np.bincount(clean.ravel())[1:].argmax()+1).astype(
-                int)
+            clean = (clean==np.bincount(clean.ravel())[1:].argmax()+1).astype(int)
             clean2 = skis.clear_border(clean)
             regions = skime.regionprops(clean2)
             if (np.sum(clean2) > 0):
                 if n == 0:
-                    keyhole_centroid = [[i,regions[0].centroid[0],
-                                         regions[0].centroid[1]]]
+                    keyhole_centroid = [[i,regions[0].centroid[0],regions[0].centroid[1]]]
                 else:
-                    keyhole_centroid = np.append(keyhole_centroid, [[i,
-                                   regions[0].centroid[0],regions[0].centroid[
-                                       1]]], axis = 0)
+                    keyhole_centroid = np.append(keyhole_centroid, [[i,regions[0].centroid[0],regions[0].centroid[1]]], axis = 0)
                 n = n+1    
             segmentation[(clean == 1),i] = 3
      
@@ -199,12 +189,8 @@ def interpret_segmentation(segmentation, skymask, keyhole_threshold):
     clean = ndi.median_filter(clean, size=(1,1,10))
     segmentation[((segmentation == 2) & ~clean)] = 1       
             
-    # Particles and spatters are positive and above the surface so find what is 
-    # either added material or the inititial substrate spatters are labelled as
-    # 4
-    clean = ((segmentation == 0) | ~np.repeat(skymask.reshape((
-        segmentation.shape[0],segmentation.shape[1], 1)),segmentation.shape[2],
-        axis = 2) == 1)
+    # Particles and spatters are positive and above the surface so find what is either added material or the inititial substrate spatters are labelled as 4
+    clean = ((segmentation == 0) | ~skymask == 1)
     clean2 = np.copy(clean)
     # find all but the biggest object in each frame
     for i in range(segmentation.shape[2]):
@@ -215,11 +201,8 @@ def interpret_segmentation(segmentation, skymask, keyhole_threshold):
                 int)
     segmentation[(clean2 & ~clean)] = 4
     
-    # label the region of no change that is in the skymask as the sky labeled 
-    # as 5
-    segmentation[((segmentation == 1) & np.repeat(skymask.reshape((
-        segmentation.shape[0], segmentation.shape[1], 1)), segmentation.shape[
-            2], axis = 2))] = 5
+    # label the region of no change that is in the skymask as the sky labeled as 5
+    segmentation[((segmentation == 1) & skymask)] = 5
     
     return segmentation, keyhole_centroid
 
@@ -250,6 +233,7 @@ def main(arg):
     
     rawims = loadsynchronous(filepathin)
     
+    # Small median filter on the raw input images helps
     rawims = ndi.median_filter(rawims, size = (3, 3, 1))
     
     clearims = np.copy(rawims[:,:,0:50])
@@ -263,34 +247,39 @@ def main(arg):
     
     # divide the stack by the mean of the first 50 images
     delta_rawims, _ = delta_stack(rawims, clearim)
+    un_normalised = np.copy(delta_rawims)
     # Normalise the stack by matching the the mean and standard deviation 
     delta_rawims = normalize_stack(delta_rawims, noise)
     # Segment into 3 catagories (additive = 1, background = 2, subtractive = 3)
     segmentation = np.digitize(delta_rawims, bins=thresholds)
     
-    # Apply a median filter to the additive and subtractive masks and 
-    # re-combine 
-    segmentation = denoise_segmentation(segmentation)
+    # Apply a median filter to the additive and subtractive masks and re-combine 
+    filter_size = (6,6,1)
+    segmentation = denoise_segmentation(segmentation,filter_size)
     # Interpret that segementation (additive = 0, substrate = 1,
     # frozen porosity = 2, keyhole = 3, spatter = 4, sky = 5)
-    segmentation, keyhole_centroid = interpret_segmentation(segmentation, 
-                                 skymask, keyhole_threshold)
+    segmentation, keyhole_centroid = interpret_segmentation(segmentation, skymask, keyhole_threshold)
     
+    # save output images as 8 bit tif image sequence
     saveims(np.uint8(segmentation),filepathin,filepathout)
 
-    plt.hist(delta_rawims.ravel(), bins = 256, color = 'blue')
-    plt.hist(delta_clearims.ravel(), bins = 256, color = 'red')
+    plt.hist(un_normalised.ravel(), bins = 256, color = 'green', alpha = 0.5, label= 'Raw')
+    plt.hist(delta_rawims.ravel(), bins = 256, color = 'blue', alpha = 0.5, label= 'Normalised mean and SD')
+    plt.hist(delta_clearims.ravel(), bins = 256, color = 'red', alpha = 0.5, label= 'First 50 (background)')
+    for thresh in thresholds:
+        plt.axvline(thresh, color='r')
     plt.yscale('symlog')
+    plt.legend()
+    plt.xlabel('Stack divided by average of first 50 frames')
+    plt.ylabel('Counts')
+
     plt.show()    
         
     slider_ims = scale_stack(segmentation)
     
     slider(slider_ims)
-    
     plt.show()
-    
-    return segmentation
     
 if __name__ == "__main__":
     
-    segmentation = main(sys.argv[1:])
+    main(sys.argv[1:])
