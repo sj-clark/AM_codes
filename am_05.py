@@ -6,7 +6,8 @@ Created on Wed Feb 17 16:20:16 2021
 """
 
 import matplotlib.pyplot as plt
-import matplotlib.widgets as wdg
+
+import pylab
 
 import os
 
@@ -21,28 +22,10 @@ import cv2
 import numpy as np
 
 import skimage.morphology as skim
-import skimage.measure as skime
 import skimage.filters as skif
 import skimage.segmentation as skis
 
 import scipy.ndimage as ndi
-
-class slider():
-    def __init__(self, data):
-        self.data = data
-
-        plt.subplot(111)
-        plt.subplots_adjust(left=0.25, bottom=0.25)
-
-        self.frame = 0
-        self.l = plt.imshow(self.data[:,:,self.frame], vmin = 0, vmax = 1) 
-        axframe = plt.axes([0.25, 0.1, 0.65, 0.03])
-        self.sframe = wdg.Slider(axframe, 'Frame', 0, self.data.shape[2]-1, valfmt='%0.0f')
-        self.sframe.on_changed(self.update)
-
-    def update(self, val):
-        self.frame = int(np.around(self.sframe.val))
-        self.l.set_data(self.data[:,:,self.frame])
     
 def interface_mask(im):
     skymask = np.zeros_like(im)
@@ -56,21 +39,15 @@ def interface_mask(im):
     return  skymask
 
 def delta_stack(ims,im):
-    delta_ims = ims / (np.repeat(im.reshape((ims.shape[0], ims.shape[1], 1)), ims.shape[2], axis = 2))
-    noise = np.std(delta_ims) 
-    return delta_ims, noise
-
-
-def normalize_stack(ims, noise):
-    for i in range(ims.shape[2]):
-        clean = np.copy(ims[:,:,i])
-        median = np.nanmedian(clean)
-        clean[clean > (median+6*noise)] = np.nan
-        clean[clean < (median-6*noise)] = np.nan
-        noise2 = np.nanstd(clean)
-        mean2 = np.nanmean(clean)
-        ims[:,:,i] = (noise/noise2)*(ims[:,:,i]-mean2)+1
-        
+    im = np.log(im+1)
+    ims = np.log(ims+1)
+    #n = 20
+    #n_shift = int(np.ceil((n/2)))
+    #background = ndi.median_filter(ims, size = [1,1,n])
+    #background = ndi.shift(background,[0,0,n_shift])
+    #background[:,:,0:n_shift] = np.repeat(im.reshape((ims.shape[0], ims.shape[1], 1)),n_shift, axis = 2)
+    #ims = ims-background
+    ims = ims - (np.repeat(im.reshape((ims.shape[0], ims.shape[1], 1)), ims.shape[2], axis = 2)) 
     return ims
 
 def loaddir(indir):
@@ -119,22 +96,11 @@ def loadsynchronous(indir):
     return ims 
 
 def flicker(ims):
-    
-    benchmark = np.copy(ims[:,:,0])
-    ratio = np.zeros(ims.shape[2])
+    benchmark = np.copy(ims[:,:,0])+1
     
     for i in range(ims.shape[2]):
-        im = ims[:,:,i]
-        imratio = im/benchmark
-        ratio[i] = np.nanmedian(imratio)
-        ims[:,:,i] = ims[:,:,i]/ratio[i]
-        
-    return ims
-
-def FFC(ims, darkim, flatim):
-        
-    for i in range(ims.shape[2]):
-        ims[:,:,i] = (ims[:,:,i]-darkim)/(flatim-darkim)
+        ratio = np.nanmedian(((ims[:,:,i]+1)/benchmark))
+        ims[:,:,i] = ims[:,:,i]/ratio
         
     return ims
 
@@ -142,69 +108,35 @@ def scale_stack(ims):
     upper_bound = np.nanmax(ims)
     lower_bound = np.nanmin(ims)
     ims = (ims-lower_bound)/(upper_bound-lower_bound)
-    ims[ims > 1] = 1
-    ims[ims < 0] = 0
     return ims
 
-def denoise_segmentation(segmentation, filter_size):
-    additive = (segmentation == 0)
-    subtractive = (segmentation == 2)
-    additive = ndi.median_filter(additive, size = filter_size)
-    subtractive = ndi.median_filter(subtractive, size = filter_size)
-    segmentation = np.ones_like(segmentation)
-    segmentation[additive] = 0
-    segmentation[subtractive] = 2
-    return segmentation
-
-def interpret_segmentation(segmentation, skymask, keyhole_threshold):
-
-    skymask = np.repeat(skymask.reshape((segmentation.shape[0],segmentation.shape[1], 1)), segmentation.shape[2], axis = 2)
-
-    # Segmentation cleanup - remove segemnted negative build above initial level as this is impossible
-    segmentation[((segmentation == 2) & skymask)] = 1
-    # Segmentation cleanup - remove segemnted positive build below initial level as this would be unexpexted - review if using dissimilar powder and substrate
-    segmentation[((segmentation == 0) & ~skymask)] = 1
+def normalize_stack(ims):
     
-    # isolate and extract the keyhole location and label the keyhole as 3     
-    n = 0
-    keyhole_centroid = np.empty([1,3])
-    for i in range(segmentation.shape[2]):
-        clean = segmentation[:,:,i] == 2
-        clean = skim.remove_small_objects(clean, min_size = keyhole_threshold)
-        if (np.sum(clean) > 0):
-            clean = skime.label(clean)
-            clean = (clean==np.bincount(clean.ravel())[1:].argmax()+1).astype(int)
-            clean2 = skis.clear_border(clean)
-            regions = skime.regionprops(clean2)
-            if (np.sum(clean2) > 0):
-                if n == 0:
-                    keyhole_centroid = [[i,regions[0].centroid[0],regions[0].centroid[1]]]
-                else:
-                    keyhole_centroid = np.append(keyhole_centroid, [[i,regions[0].centroid[0],regions[0].centroid[1]]], axis = 0)
-                n = n+1    
-            segmentation[(clean == 1),i] = 3
-     
-    # Frozen in pores are stationary use a median filter in the t direction
-    clean = (segmentation == 2)
-    clean = ndi.median_filter(clean, size=(1,1,10))
-    segmentation[((segmentation == 2) & ~clean)] = 1       
-            
-    # Particles and spatters are positive and above the surface so find what is either added material or the inititial substrate spatters are labelled as 4
-    clean = ((segmentation == 0) | ~skymask == 1)
-    clean2 = np.copy(clean)
-    # find all but the biggest object in each frame
-    for i in range(segmentation.shape[2]):
-        im = np.copy(clean[:,:,i])
-        if (np.sum(clean[:,:,i]) > 0):
-            im = skime.label(im)
-            clean[:,:,i] = (im==np.bincount(im.ravel())[1:].argmax()+1).astype(
-                int)
-    segmentation[(clean2 & ~clean)] = 4
+    for i in range(ims.shape[2]):
+        upper_bound = np.nanquantile(ims[:,:,i], 0.9) 
+        lower_bound = np.nanquantile(ims[:,:,i], 0.1)
+        ims[:,:,i] = (ims[:,:,i]-lower_bound)/(upper_bound-lower_bound)
+        
+    return ims
+
+def region_segment(ims, n):
+    segmented = np.zeros_like(ims)
+    markers = np.zeros_like(ims)
+    elevation = np.zeros_like(ims)
+    selem = skim.disk(1)
+    r = abs(np.nanquantile(ims[:,:,0:n],0.0001)-np.nanquantile(ims[:,:,0:n], 0.9999))
+    m = np.nanmedian(ims[:,:,0:n])
+    thresholds = [m-(1*r), m-(0.25*r), m+(0.25*r), m+(1*r)]
+
+    for i in range(ims.shape[2]):
+        elevation[:,:,i] = skif.sobel(ims[:,:,i])
+        markers[ndi.binary_erosion(np.logical_and(ims[:,:,i] > thresholds[1], ims[:,:,i] < thresholds[2])), i] = 1
+        markers[ndi.binary_erosion(ims[:,:,i] < thresholds[0],structure=selem),i] = 2
+        markers[ndi.binary_erosion(ims[:,:,i] > thresholds[3],structure=selem),i] = 3
+        segmented[:,:,i] = skis.watershed(elevation[:,:,i], markers[:,:,i])
     
-    # label the region of no change that is in the skymask as the sky labeled as 5
-    segmentation[((segmentation == 1) & skymask)] = 5
-    
-    return segmentation, keyhole_centroid
+    return segmented, markers, elevation, thresholds
+
 
 def saveims(ims,indir,outdir):
     
@@ -221,65 +153,47 @@ def saveims(ims,indir,outdir):
 def main(arg):
     
     parser = argparse.ArgumentParser()
-    parser.add_argument("filepathin", help = "top directory where the tif images are located: /data/")
-    parser.add_argument("filepathout", help = "top directory where the labelled images are to be saved: /data/")
-
+    parser.add_argument("filepathin", help = "top directory where the tif images are located")
+    parser.add_argument("filepathout", help = "top directory where the labelled images are to be saved")
+    parser.add_argument("n", help = "First n images for background detection")
+    parser.add_argument("rad", help = "Radius of median filter")
+    
     args = parser.parse_args()
     
     filepathout = args.filepathout
     filepathin = args.filepathin
+    n = int(args.n)
+    rad = args.rad
     
-    keyhole_threshold = 500
+    """
+    filepathout = '/Users/samueljclark/Desktop/output'
+    filepathin = '/Users/samueljclark/Desktop/APS_Ti_Weld/UCL_S0433'
+    n = 50 # first n clear images
+    rad = 1.5 # Radius of median filter for initial filtering
+    """
     
-    rawims = loadsynchronous(filepathin)
+    A = loadsynchronous(filepathin)
+    selem = skim.disk(float(rad))
+    selem = selem.reshape((selem.shape[0],selem.shape[1],1))
+    B = normalize_stack(skif.median(A,selem))
+    C = flicker(B)
+    D = np.nanmean(C[:,:,0:n], axis = 2)
+    E = delta_stack(C, D)
+    segmented, markers, elevation, thresholds = region_segment(E, n)
+    saveims(np.uint8(segmented),filepathin,filepathout)
     
-    # Small median filter on the raw input images helps
-    rawims = ndi.median_filter(rawims, size = (3, 3, 1))
-    
-    clearims = np.copy(rawims[:,:,0:50])
-    clearims = flicker(clearims)
-    clearim = np.nanmean(clearims, axis = 2)
-    delta_clearims, noise = delta_stack(clearims, clearim)
-    thresholds = [np.nanquantile(delta_clearims, 0.001),np.nanquantile(delta_clearims, 0.999)]
-    
-    im0 = np.copy(rawims[:,:,0]) 
-    skymask = interface_mask(im0)
-    
-    # divide the stack by the mean of the first 50 images
-    delta_rawims, _ = delta_stack(rawims, clearim)
-    un_normalised = np.copy(delta_rawims)
-    # Normalise the stack by matching the the mean and standard deviation 
-    delta_rawims = normalize_stack(delta_rawims, noise)
-    # Segment into 3 catagories (additive = 1, background = 2, subtractive = 3)
-    segmentation = np.digitize(delta_rawims, bins=thresholds)
-    
-    # Apply a median filter to the additive and subtractive masks and re-combine 
-    filter_size = (6,6,1)
-    segmentation = denoise_segmentation(segmentation,filter_size)
-    # Interpret that segementation (additive = 0, substrate = 1,
-    # frozen porosity = 2, keyhole = 3, spatter = 4, sky = 5)
-    segmentation, keyhole_centroid = interpret_segmentation(segmentation, skymask, keyhole_threshold)
-    
-    # save output images as 8 bit tif image sequence
-    saveims(np.uint8(segmentation),filepathin,filepathout)
-
-    plt.hist(un_normalised.ravel(), bins = 256, color = 'green', alpha = 0.5, label= 'Raw')
-    plt.hist(delta_rawims.ravel(), bins = 256, color = 'blue', alpha = 0.5, label= 'Normalised mean and SD')
-    plt.hist(delta_clearims.ravel(), bins = 256, color = 'red', alpha = 0.5, label= 'First 50 (background)')
+    fig = plt.figure(figsize=(8, 6))
+    ax = fig.add_subplot(111)
+    ax.hist(E.ravel(), bins = 256, color = 'blue', label= 'Raw')
+    ax.hist(E[:,:,0:n].ravel(), bins = 256, color = 'red', label= 'First n (background)')
     for thresh in thresholds:
-        plt.axvline(thresh, color='r')
-    plt.yscale('symlog')
-    plt.legend()
-    plt.xlabel('Stack divided by average of first 50 frames')
-    plt.ylabel('Counts')
-
-    plt.show()    
-        
-    slider_ims = scale_stack(segmentation)
-    
-    slider(slider_ims)
-    plt.show()
+        ax.axvline(thresh, color='black') 
+    ax.set_yscale('log')
+    ax.legend()
+    ax.set_xlabel('Stack subtracted by average of first 50 frames')
+    ax.set_ylabel('Counts')
+    pylab.show()
     
 if __name__ == "__main__":
-    
+
     main(sys.argv[1:])
